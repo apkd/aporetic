@@ -30,6 +30,7 @@ jobs:
 
     strategy:
       fail-fast: false
+      # No max-parallel cap: use the repo/org runner concurrency limit.
       matrix:
         family:
           - plan: aporetic-sans
@@ -281,10 +282,181 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-variable-font:
+    name: ${{ matrix.family.plan }} variable ${{ matrix.slope.key }}
+    runs-on: ubuntu-latest
+    needs: build-font
+
+    strategy:
+      fail-fast: false
+      # No max-parallel cap: use the repo/org runner concurrency limit.
+      matrix:
+        family:
+          - plan: aporetic-sans
+            name: "Aporetic Sans"
+          - plan: aporetic-sans-mono
+            name: "Aporetic Sans Mono"
+          - plan: aporetic-serif
+            name: "Aporetic Serif"
+          - plan: aporetic-serif-mono
+            name: "Aporetic Serif Mono"
+        slope:
+          - key: upright
+            name: ""
+          - key: italic
+            name: "Italic"
+
+    env:
+      FAMILY_PLAN: ${{ matrix.family.plan }}
+      FONT_FAMILY: ${{ matrix.family.name }}
+      SLOPE_KEY: ${{ matrix.slope.key }}
+      SLOPE_NAME: ${{ matrix.slope.name }}
+
+    steps:
+      - name: Download static font artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: font-${{ matrix.family.plan }}-normal-*-${{ matrix.slope.key }}
+          path: static
+          merge-multiple: true
+
+      - name: Install fontTools
+        run: |
+          set -euo pipefail
+
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install fonttools
+
+      - name: Build variable TTF from unhinted masters
+        run: |
+          set -euo pipefail
+
+          . .venv/bin/activate
+          mkdir -p designspace out/Variable-TTF
+
+          python <<'PY'
+          from pathlib import Path
+          import html
+          import os
+          import subprocess
+
+          weights = {
+              "thin": 100,
+              "extralight": 200,
+              "light": 300,
+              "regular": 400,
+              "medium": 500,
+              "semibold": 600,
+              "bold": 700,
+              "extrabold": 800,
+              "heavy": 900,
+          }
+
+          weight_names = {
+              "thin": "Thin",
+              "extralight": "ExtraLight",
+              "light": "Light",
+              "regular": "Regular",
+              "medium": "Medium",
+              "semibold": "SemiBold",
+              "bold": "Bold",
+              "extrabold": "ExtraBold",
+              "heavy": "Heavy",
+          }
+
+          family = os.environ["FAMILY_PLAN"]
+          family_name = os.environ["FONT_FAMILY"]
+          slope = os.environ["SLOPE_KEY"]
+          slope_name = os.environ["SLOPE_NAME"]
+
+          root = Path("static")
+          designspace_root = Path("designspace")
+          output_root = Path("out/Variable-TTF")
+
+          def escape(value):
+              return html.escape(str(value), quote=True)
+
+          sources = []
+
+          for weight, weight_value in weights.items():
+              font_path = root / family / "TTF-Unhinted" / f"{family}-normal{weight}{slope}.ttf"
+              if not font_path.exists():
+                  raise FileNotFoundError(font_path)
+
+              style_name = weight_names[weight]
+              if slope_name:
+                  style_name = f"{style_name} {slope_name}"
+
+              sources.append(
+                  {
+                      "filename": font_path.resolve(),
+                      "name": f"{family}-{weight}-{slope}",
+                      "family": family_name,
+                      "style": style_name,
+                      "weight": weight_value,
+                  }
+              )
+
+          designspace_path = designspace_root / f"{family}-{slope}.designspace"
+          output_path = output_root / f"{family}-normal{slope}-variable.ttf"
+
+          source_xml = []
+          for source in sources:
+              source_xml.append(
+                  f'''    <source filename="{escape(source["filename"])}" name="{escape(source["name"])}" familyname="{escape(source["family"])}" stylename="{escape(source["style"])}">
+            <location>
+              <dimension name="Weight" xvalue="{source["weight"]}"/>
+            </location>
+          </source>'''
+              )
+
+          designspace_path.write_text(
+              f'''<?xml version="1.0" encoding="UTF-8"?>
+          <designspace format="5.0">
+            <axes>
+              <axis tag="wght" name="Weight" minimum="100" maximum="900" default="400"/>
+            </axes>
+            <sources>
+          {chr(10).join(source_xml)}
+            </sources>
+          </designspace>
+          ''',
+              encoding="utf-8",
+          )
+
+          subprocess.run(
+              [
+                  "fonttools",
+                  "varLib",
+                  "-o",
+                  str(output_path),
+                  str(designspace_path),
+              ],
+              check=True,
+          )
+
+          if not output_path.exists():
+              raise FileNotFoundError(output_path)
+
+          print(output_path)
+          PY
+
+      - name: Upload variable font artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: font-variable-ttf-${{ matrix.family.plan }}-${{ matrix.slope.key }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: build-font
+    needs:
+      - build-font
+      - build-variable-font
     permissions:
       contents: write
 
@@ -327,7 +499,8 @@ jobs:
           - Slopes: upright, italic
           - Width: normal
           - Features: default contextual ligatures, exported glyph names for Kitty, OpenType CV/SS features
-          - Formats: hinted TTF, unhinted TTF, WOFF2
+          - Formats: hinted TTF, unhinted TTF, variable TTF, WOFF2
+          - Variable TTFs: eight weight-axis fonts generated from unhinted static masters
           EOF
 
       - name: Publish release
