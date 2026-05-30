@@ -430,6 +430,13 @@ jobs:
               [
                   "fonttools",
                   "varLib",
+                  # Iosevka's generated static masters can differ in OTL
+                  # coverage tables across weights. Keep default-master GSUB
+                  # substitutions, but skip variable GDEF/GPOS merging.
+                  "-x",
+                  "GDEF",
+                  "-x",
+                  "GPOS",
                   "-o",
                   str(output_path),
                   str(designspace_path),
